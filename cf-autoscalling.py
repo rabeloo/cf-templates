@@ -2,22 +2,24 @@
 # Author:       Raphael Rabelo
 # Github:       https://github.com/rabeloo
 # Description:  Create an instance with autoscalling, metadata and userdata configs.
-#               You can adapt for you needs, adding or removing things.
+#               You can adapt for your needs, adding or removing things.
 
 from troposphere import Base64, FindInMap, GetAtt, GetAZs, Join
 from troposphere import Parameter, Output, Ref, Template
 from troposphere import cloudformation, autoscaling
 from troposphere.iam import Role, PolicyType
 from troposphere.autoscaling import AutoScalingGroup, Tag
-from troposphere.autoscaling import LaunchConfiguration
+from troposphere.autoscaling import LaunchConfiguration, Metadata
 import troposphere.ec2 as ec2
+import troposphere.cloudformation as cf
 
 ## Fast Settings
-# Tip: Put your
+# Tip: Put your main configs here:
 instance_type       = "m3.medium"
 security_groups_ids = "sg-xxxxxx"
 ami_id              = "ami-xxxxxx"
 subnet_ids          = ["subnet-xxxxxx", "subnet-xxxxxx", "subnet-xxxxxx"]
+elb_name            = "elb_name"
 
 # Template {}
 t = Template()
@@ -70,7 +72,8 @@ region_map = t.add_mapping('RegionMap', {
     "sa-east-1" : {
       "AMIid"   : ami_id,
       "SGid"    : security_groups_ids,
-      "SNETid"  : subnet_ids
+      "SNETid"  : subnet_ids,
+      "ELBName" : elb_name
     }}
 )
 
@@ -145,7 +148,43 @@ launchconfig_resource = t.add_resource(LaunchConfiguration(
        "Ref": "AWS::Region"
    },
    "\n"]
-  ))
+  )),
+  Metadata=Metadata(
+    cf.Init({
+      "configsets" : cf.InitConfigSets(InstallandRun = [ "install", "config" ] ),
+
+      "install" : cf.InitConfig(packages = { "yum" : { "git" : [] , "wget" : [] } }),
+
+      "config" : cf.InitConfig(
+        files = cf.InitFiles({
+          "/tmp/example.txt" : cf.InitFile(
+            content = Join('', [
+              "This is a file example.\n",
+              "See another examples in:\n",
+              "https://github.com/rabeloo/cf-templates\n"
+            ]),
+            owner = "root",
+            group = "root",
+            mode = "000600"
+          )
+        }),
+      ),
+    })
+  )
 ))
+
+autoscaling_resource = t.add_resource(AutoScalingGroup(
+  "myAutoScalingGroup",
+  DesiredCapacity         = Ref(desInstances_param),
+  MinSize                 = Ref(minInstances_param),
+  MaxSize                 = Ref(maxInstances_param),
+  LoadBalancerNames       = FindInMap("RegionMap", { "Ref" : "AWS::Region" }, "ELBName" ),
+  AvailabilityZones       = GetAZs(""),
+  LaunchConfigurationName = Ref(launchconfig_resource),
+  VPCZoneIdentifier       = FindInMap( "RegionMap", { "Ref" : "AWS::Region"}, "SNETid" ),
+  Tags                    = [Tag( "Name", "My New Instance", True ), Tag( "Project", "My Project", True )]
+))
+
+
 
 print(t.to_json())
