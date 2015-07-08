@@ -3,27 +3,25 @@
 # Github:       https://github.com/rabeloo
 # Description:  Create an instance with autoscalling, metadata and userdata configs.
 #               You can adapt for your needs, adding or removing things.
-
-from troposphere import Base64, FindInMap, GetAtt, GetAZs, Join
-from troposphere import Parameter, Output, Ref, Template
-from troposphere import cloudformation, autoscaling
-from troposphere.iam import Role, PolicyType
-from troposphere.autoscaling import AutoScalingGroup, Tag
-from troposphere.autoscaling import LaunchConfiguration, Metadata
-import troposphere.ec2 as ec2
+import inspect
 import troposphere.cloudformation as cf
+import troposphere.ec2 as ec2
+from troposphere import cloudformation as cf
+from troposphere import (Base64, FindInMap, GetAtt, GetAZs, Join, Output, Parameter, Ref, Template, autoscaling)
+from troposphere.autoscaling import (AutoScalingGroup, ScalingPolicy, LaunchConfiguration, Metadata, Tag)
+from troposphere.iam import PolicyType, Role, InstanceProfile
 
 ## Fast Settings
 # Tip: Put your main configs here:
-instance_type       = "m3.medium"
-security_groups_ids = "sg-xxxxxx"
-ami_id              = "ami-xxxxxx"
-subnet_ids          = ["subnet-xxxxxx", "subnet-xxxxxx", "subnet-xxxxxx"]
-elb_name            = "elb_name"
+instance_type       = "t2.micro"
+security_groups_ids = ["sg-xxxxxxxx"]
+ami_id              = "ami-xxxxxxxx"
+elb_name            = ["elb_name_here"]
+availability_zones  = ["us-east-1a","us-east-1b"] # Tip: You can try GetAZs("")
+subnet_ids          = ["subnet-xxxxxxxx", "subnet-xxxxxxxx"]
 
 # Template {}
 t = Template()
-
 t.add_description("An EC2 instances with AutoScalling Group")
 t.add_version("2010-09-09")
 
@@ -34,22 +32,22 @@ keyname_param = t.add_parameter(Parameter("KeyName",
 ))
 
 instanceType_param = t.add_parameter(Parameter("InstanceType",
-  Description           = "My instances",
+  Description           = "Choose instance type for EC2",
   ConstraintDescription = "must be a valid EC2 instance type",
   Default               = instance_type,
-  Type                  = "String"
+  Type                  = "String",
+  AllowedValues         = [
+    "t2.micro"  , "t2.small"  , "t2.medium"  ,
+    "m3.medium" , "m3.large"  , "m3.xlarge"  , "m3.2xlarge" ,
+    "c3.large"  , "c3.xlarge" , "c3.2xlarge" , "c3.4xlarge" , "c3.8xlarge"  ,
+    "c4.large"  , "c4.xlarge" , "c4.2xlarge" , "c4.4xlarge" , "c4.8xlarge"  ,
+    "r3.large"  , "r3.xlarge" , "r3.2xlarge" , "r3.4xlarge" , "r3.8xlarge"] ,
 ))
 
 minInstances_param = t.add_parameter(Parameter("MinNumInstances",
   Type                  = "Number",
   Description           = "Number of minimum instances",
   ConstraintDescription = "Must be less than MaxNumInstances",
-  AllowedValues         = [
-    "t2.micro", "t2.small", "t2.medium",
-    "m3.medium", "m3.large", "m3.xlarge", "m3.2xlarge",
-    "c3.large", "c3.xlarge", "c3.2xlarge", "c3.4xlarge", "c3.8xlarge",
-    "c4.large", "c4.xlarge", "c4.2xlarge", "c4.4xlarge", "c4.8xlarge",
-    "r3.large", "r3.xlarge", "r3.2xlarge", "r3.4xlarge", "r3.8xlarge"],
   Default               = "1",
 ))
 
@@ -69,16 +67,15 @@ desInstances_param = t.add_parameter(Parameter("DesNumInstances",
 
 ## Mappings
 region_map = t.add_mapping('RegionMap', {
-    "sa-east-1" : {
+    "us-east-1" : {
       "AMIid"   : ami_id,
       "SGid"    : security_groups_ids,
       "SNETid"  : subnet_ids,
-      "ELBName" : elb_name
+      "ELBName" : elb_name,
     }}
 )
 
 ## Resources
-
 iam_role_resource = t.add_resource(Role(
   "IAMRole",
   Path  = "/",
@@ -101,10 +98,10 @@ iam_role_resource = t.add_resource(Role(
    }
 ))
 
-iam_instanceprofile_resource = t.add_resource(PolicyType(
+iam_policy_resource = t.add_resource(PolicyType(
   "IAMPolicy",
   PolicyName      = "bootstrap",
-  Roles           = Ref(iam_role_resource),
+  Roles           = [Ref(iam_role_resource)],
   PolicyDocument  =
   {
     "Version":"2012-10-17",
@@ -122,6 +119,13 @@ iam_instanceprofile_resource = t.add_resource(PolicyType(
     ]
  }
 ))
+
+iam_instanceprofile_resource = t.add_resource(InstanceProfile(
+    "IAMInstanceProfile",
+    Path            = "/",
+    Roles           = [Ref(iam_role_resource)]
+))
+
 
 launchconfig_resource = t.add_resource(LaunchConfiguration(
   "myLaunchConfig",
@@ -152,9 +156,7 @@ launchconfig_resource = t.add_resource(LaunchConfiguration(
   Metadata=Metadata(
     cf.Init({
       "configsets" : cf.InitConfigSets(InstallandRun = [ "install", "config" ] ),
-
       "install" : cf.InitConfig(packages = { "yum" : { "git" : [] , "wget" : [] } }),
-
       "config" : cf.InitConfig(
         files = cf.InitFiles({
           "/tmp/example.txt" : cf.InitFile(
@@ -173,18 +175,37 @@ launchconfig_resource = t.add_resource(LaunchConfiguration(
   )
 ))
 
-autoscaling_resource = t.add_resource(AutoScalingGroup(
+autoscaling_group_resource = t.add_resource(AutoScalingGroup(
   "myAutoScalingGroup",
-  DesiredCapacity         = Ref(desInstances_param),
-  MinSize                 = Ref(minInstances_param),
-  MaxSize                 = Ref(maxInstances_param),
-  LoadBalancerNames       = FindInMap("RegionMap", { "Ref" : "AWS::Region" }, "ELBName" ),
-  AvailabilityZones       = GetAZs(""),
-  LaunchConfigurationName = Ref(launchconfig_resource),
-  VPCZoneIdentifier       = FindInMap( "RegionMap", { "Ref" : "AWS::Region"}, "SNETid" ),
-  Tags                    = [Tag( "Name", "My New Instance", True ), Tag( "Project", "My Project", True )]
+  DesiredCapacity          = Ref(desInstances_param),
+  MinSize                  = Ref(minInstances_param),
+  MaxSize                  = Ref(maxInstances_param),
+  Cooldown                 = "300",
+  LoadBalancerNames        = FindInMap("RegionMap", { "Ref" : "AWS::Region" }, "ELBName" ),
+  AvailabilityZones        = availability_zones,
+  LaunchConfigurationName  = Ref(launchconfig_resource),
+  VPCZoneIdentifier        = FindInMap( "RegionMap", { "Ref" : "AWS::Region"}, "SNETid" ),
+  Tags                     = [Tag( "Name", "MyInstance", True ), Tag( "Project", "MyProject", True ), Tag( "Team", "MyTeam", True )]
 ))
 
+autoscaling_up_resource    = t.add_resource(ScalingPolicy(
+    "myScalingUp",
+    AdjustmentType         = "ChangeInCapacity",
+    ScalingAdjustment      = "1",
+    Cooldown               = "300",
+    AutoScalingGroupName   = Ref(autoscaling_group_resource)
+))
 
+autoscaling_down_resource    = t.add_resource(ScalingPolicy(
+    "myScalingDown",
+    AdjustmentType         = "ChangeInCapacity",
+    ScalingAdjustment      = "-1",
+    Cooldown               = "300",
+    AutoScalingGroupName   = Ref(autoscaling_group_resource)
+))
 
-print(t.to_json())
+# Printing json template
+filename = inspect.getfile(inspect.currentframe(0))
+t_json = t.to_json()
+file=open('./' + filename + '.json','w')
+file.write(t_json)

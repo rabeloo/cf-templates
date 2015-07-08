@@ -1,2 +1,2 @@
 # cf-templates
-AWS CloudFormation template using Troposphere library
+Simple AWS CloudFormation templates using Troposphere library.
